@@ -6,6 +6,8 @@ The device's Samsung SystemUI `DesktopModeWindowDecoration.getCaptionType(Runnin
 
 The APK has no application permissions or launcher activity. Enable **LibreDeX window controls** in Vector/LSPosed and select **System UI** (`com.android.systemui`) only, then reboot. The existing LibreDeX module and its scopes stay enabled. Start DP output normally afterward.
 
+Version 0.2 also bridges ordinary application windows on the active wired display into Samsung Launcher's single-task recent-app list. The system otherwise labels these as freeform recents that the desktop list skips. Only the recents envelope changes: the original task information, minimized flag, display, bounds and actual window mode are preserved. Home/recents tasks and other displays are excluded. Disable this independently with `persist.dex.lspmirror.taskbar_bridge=0` and refresh the recent-app list. Taskbar restoration still requires device validation; maximize/restore and position persistence are separate unresolved issues.
+
 Build and test: `./gradlew :caption-fix:testDebugUnitTest :caption-fix:assembleDebug`. The fork's Actions workflow publishes the APK, checksum and unit-test results as an artifact. A successful build does not establish device compatibility; visually verify the controls before relying on the patch.
 
 Rollback: disable this companion module in Vector and reboot. For a temporary runtime opt-out, run `adb shell su -c 'setprop persist.dex.lspmirror.full_caption 0'`, then reopen app windows. Delete that property or set it to 1 to enable again. The original LibreDeX installation remains available throughout.
