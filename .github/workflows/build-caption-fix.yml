@@ -1,0 +1,40 @@
+name: Build wired DeX window controls
+
+on:
+  push:
+    branches: [fix/dex-window-caption-f7310]
+    paths: ['caption-fix/**', 'xposed-stubs/**', 'settings.gradle', '.github/workflows/build-caption-fix.yml']
+  pull_request:
+    paths: ['caption-fix/**', 'xposed-stubs/**', 'settings.gradle', '.github/workflows/build-caption-fix.yml']
+  workflow_dispatch:
+
+permissions:
+  contents: read
+
+jobs:
+  build:
+    runs-on: ubuntu-latest
+    timeout-minutes: 20
+    steps:
+      - uses: actions/checkout@v4
+      - uses: actions/setup-java@v4
+        with:
+          distribution: temurin
+          java-version: '17'
+      - uses: android-actions/setup-android@v3
+      - uses: gradle/actions/setup-gradle@v4
+      - name: Install Android SDK
+        run: sdkmanager 'platforms;android-34' 'build-tools;34.0.0'
+      - name: Test and build companion module
+        run: |
+          chmod +x gradlew
+          ./gradlew :caption-fix:testDebugUnitTest :caption-fix:assembleDebug --no-daemon --stacktrace
+      - name: Record APK checksum
+        run: sha256sum caption-fix/build/outputs/apk/debug/*.apk > caption-fix/build/outputs/apk/debug/SHA256SUMS.txt
+      - uses: actions/upload-artifact@v4
+        with:
+          name: libredex-window-controls-${{ github.sha }}
+          path: |
+            caption-fix/build/outputs/apk/debug/*.apk
+            caption-fix/build/outputs/apk/debug/SHA256SUMS.txt
+            caption-fix/build/test-results/testDebugUnitTest/*.xml
