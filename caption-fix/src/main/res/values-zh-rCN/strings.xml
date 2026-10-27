@@ -1,0 +1,5 @@
+<?xml version="1.0" encoding="utf-8"?>
+<resources>
+    <string name="app_name">LibreDeX 窗口控制</string>
+    <string name="module_description">为 LibreDeX 有线外接屏启用完整标题栏。仅作用于系统界面。</string>
+</resources>
