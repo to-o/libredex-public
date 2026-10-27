@@ -23,6 +23,8 @@ public final class DexCaptionHook implements IXposedHookLoadPackage {
         if (!"com.android.systemui".equals(lpparam.packageName)) {
             return;
         }
+        TaskbarHook.install(lpparam.classLoader);
+        DesktopInitHook.install(lpparam.classLoader);
         try {
             Class<?> decoration = XposedHelpers.findClass(
                     "com.android.wm.shell.windowdecor.DesktopModeWindowDecoration",
