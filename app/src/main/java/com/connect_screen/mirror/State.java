@@ -26,6 +26,7 @@ import com.connect_screen.mirror.shizuku.IUserService;
 import com.connect_screen.mirror.shizuku.ShizukuUtils;
 import com.connect_screen.mirror.shizuku.SurfaceControl;
 import com.connect_screen.mirror.shizuku.UserService;
+import com.connect_screen.mirror.shizuku.UserServiceRecovery;
 import com.connect_screen.mirror.transport.TransportRegistry;
 import com.topjohnwu.superuser.Shell;
 import com.topjohnwu.superuser.ShellUtils;
@@ -188,6 +189,7 @@ public class State {
 
     private static final android.os.Handler mainHandler = new android.os.Handler(android.os.Looper.getMainLooper());
     private static volatile boolean userServiceBindInFlight;
+    private static volatile long userServiceBindGeneration;
     private static final Runnable userServiceBindTimeout = () -> userServiceBindInFlight = false;
 
     public static boolean isJobRunning() {
@@ -283,13 +285,14 @@ public class State {
         return mirrorVirtualDisplay.getDisplay().getDisplayId();
     }
 
-    public static void unbindUserService() {
+    public static synchronized void unbindUserService() {
+        userServiceBindGeneration++;
+        State.userService = null;
+        userServiceBindInFlight = false;
+        mainHandler.removeCallbacks(userServiceBindTimeout);
         try {
             boolean removeService = true;
             Shizuku.unbindUserService(State.userServiceArgs, userServiceConnection, removeService);
-            State.userService = null;
-            userServiceBindInFlight = false;
-            mainHandler.removeCallbacks(userServiceBindTimeout);
             State.log("user service unbound with removeService=true");
         } catch (Exception e) {
             // ignore
@@ -340,18 +343,42 @@ public class State {
         if (SunshineService.instance != null) {
             return SunshineService.instance;
         }
-        return null;
+        return LibreDeXApp.instance;
     }
 
-    public static void bindUserService() {
+    public static synchronized void bindUserService() {
         if (isUserServiceAlive() || userServiceBindInFlight) {
             return;
         }
         userServiceBindInFlight = true;
-        Shizuku.peekUserService(State.userServiceArgs, State.userServiceConnection);
-        Shizuku.bindUserService(State.userServiceArgs, State.userServiceConnection);
-        mainHandler.removeCallbacks(userServiceBindTimeout);
-        mainHandler.postDelayed(userServiceBindTimeout, 20_000);
+        final long generation = ++userServiceBindGeneration;
+        new Thread(() -> {
+            boolean ready;
+            try {
+                ready = UserServiceRecovery.prepareManager();
+            } catch (Throwable t) {
+                State.log("Shizuku manager recovery failed: " + t);
+                ready = false;
+            }
+            final boolean managerReady = ready;
+            mainHandler.post(() -> {
+                if (generation != userServiceBindGeneration) return;
+                if (!managerReady) {
+                    userServiceBindInFlight = false;
+                    State.log("Shizuku manager provider could not be prepared");
+                    return;
+                }
+                try {
+                    Shizuku.peekUserService(State.userServiceArgs, State.userServiceConnection);
+                    Shizuku.bindUserService(State.userServiceArgs, State.userServiceConnection);
+                    mainHandler.removeCallbacks(userServiceBindTimeout);
+                    mainHandler.postDelayed(userServiceBindTimeout, 12_000);
+                } catch (Throwable t) {
+                    userServiceBindInFlight = false;
+                    State.log("UserService bind failed: " + t);
+                }
+            });
+        }, "shizuku-bind").start();
     }
 
     public static boolean isUserServiceAlive() {

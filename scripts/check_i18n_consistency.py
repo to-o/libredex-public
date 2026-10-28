@@ -12,9 +12,11 @@ Checks:
 import re
 import sys
 import xml.etree.ElementTree as ET
+from pathlib import Path
 
-EN = r"D:\dex_work\app\src\main\res\values\strings.xml"
-ZH = r"D:\dex_work\app\src\main\res\values-zh-rCN\strings.xml"
+ROOT = Path(__file__).resolve().parent.parent
+EN = ROOT / "app/src/main/res/values/strings.xml"
+ZH = ROOT / "app/src/main/res/values-zh-rCN/strings.xml"
 
 BRAND = re.compile(
     r"^(LibreDeX|DeX|Moonlight|Shizuku|Sunshine|LSPosed|Vector|DP|HDMI|Display|"

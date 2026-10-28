@@ -6,8 +6,14 @@ plugins {
 
 // Version is normally injected by scripts/build.ps1 via -PlibredexVersionName / -PlibredexVersionCode.
 // The fallbacks below only keep IDE and direct gradlew builds usable.
-def libredexVersionName = project.findProperty('libredexVersionName') ?: '0.2.20'
-def libredexVersionCode = (project.findProperty('libredexVersionCode') ?: 266).toString().toInteger()
+def libredexVersionName = project.findProperty('libredexVersionName') ?: '0.2.21-stability.1'
+def libredexVersionCode = (project.findProperty('libredexVersionCode') ?: 267).toString().toInteger()
+// Optional Java-only rebuild using the unchanged native library from a verified
+// release APK. Default builds still compile the native engine from source.
+def prebuiltNativeDir = project.findProperty('libredexPrebuiltNativeDir')
+if (prebuiltNativeDir && !file("$prebuiltNativeDir/arm64-v8a/libsunshine_android.so").exists()) {
+    throw new GradleException('libredexPrebuiltNativeDir must contain arm64-v8a/libsunshine_android.so')
+}
 
 def optionalTransportModule = project.findProperty('optionalTransportModule')
 if (optionalTransportModule == null && rootProject.file('local.properties').exists()) {
@@ -83,7 +89,7 @@ android {
            abiFilters "arm64-v8a"
         }
 
-        externalNativeBuild {
+        if (!prebuiltNativeDir) externalNativeBuild {
             cmake {
                 arguments "-DANDROID_STL=c++_shared"
             }
@@ -123,10 +129,13 @@ android {
     buildFeatures {
         aidl true
         buildConfig true
-        prefab true
+        prefab !prebuiltNativeDir
     }
 
-    externalNativeBuild {
+    if (prebuiltNativeDir) {
+        sourceSets.main.jniLibs.srcDirs += file(prebuiltNativeDir)
+    }
+    if (!prebuiltNativeDir) externalNativeBuild {
         cmake {
             path file('src/main/cpp/CMakeLists.txt')
             version "3.22.1"

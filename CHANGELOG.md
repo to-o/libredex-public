@@ -1,3 +1,12 @@
+## 0.2.21-stability.1 (unreleased)
+
+- Recover the Shizuku manager provider and retry a failed LibreDeX helper bind before starting wired output.
+- Keep opt-in cable monitoring alive in a foreground service and restore it after boot or app updates; handle a display already connected at startup.
+- Preserve the selected idle transport and keep connection tabs and settings subpages consistent across display events.
+- Match the Xposed runtime's `setResult(Object)` ABI and apply keep-screen-on changes on the UI thread.
+- Remove the update-time helper bind/kill race and ignore cancelled startup attempts after cable removal.
+- Add regression coverage for Xposed ABI compatibility and external-display identity transitions.
+
 ## 0.2.20（2026-09-13）
 
 ### English

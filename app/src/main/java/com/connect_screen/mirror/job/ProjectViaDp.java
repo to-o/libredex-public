@@ -11,6 +11,7 @@ import com.connect_screen.mirror.Pref;
 import com.connect_screen.mirror.State;
 import com.connect_screen.mirror.shizuku.ServiceUtils;
 import com.connect_screen.mirror.shizuku.ShizukuUtils;
+import com.connect_screen.mirror.shizuku.UserServiceRecovery;
 import com.connect_screen.mirror.R;
 
 /**
@@ -26,6 +27,7 @@ public class ProjectViaDp implements Job {
     private static final String DP_MANAGED_SETTINGS_KEY = "libredex_dp_managed_display";
 
     private static volatile boolean active;
+    private static volatile long sessionGeneration;
     private static volatile int activeDisplayId = -1;
     private static volatile boolean activeMirror;
     private static volatile DpMirrorPresentation activeMirrorPresentation;
@@ -47,6 +49,7 @@ public class ProjectViaDp implements Job {
     }
 
     public static void stop(boolean startPlainMirror) {
+        sessionGeneration++;
         active = false;
         if (activeMirror) {
             DpMirrorPresentation mirrorPresentation = activeMirrorPresentation;
@@ -162,20 +165,12 @@ public class ProjectViaDp implements Job {
 
     @Override
     public void start() throws YieldException {
+        if (active) return;
         stopPlainPhoneMirror();
         Context context = State.getContext();
         if (context == null) {
             State.log(TAG + ": context unavailable");
             return;
-        }
-        if (!ShizukuUtils.hasPermission()) {
-            // server 掉线时 checkSelfPermission()==false（依赖活的 server binder），
-            // 先尝试 root 自愈（fixRootShizuku 不检查权限、直接拉起 server 并重绑），
-            // 拉起后仍无权限才报错。
-            if (!AcquireShizuku.fixRootShizuku() && !ShizukuUtils.hasPermission()) {
-                State.showErrorStatus(State.getContext().getString(R.string.dp_need_shizuku));
-                return;
-            }
         }
         ExternalDisplayMonitor.refreshState(context);
         final int displayId = State.externalDisplayId;
@@ -217,6 +212,7 @@ public class ProjectViaDp implements Job {
                 + "Hz (preferred-mode=" + usedPreferred + ")");
 
         active = true;
+        final long generation = ++sessionGeneration;
         activeDisplayId = displayId;
         activeMirror = false;
         Pref.setDpSessionStarted(true);
@@ -225,40 +221,24 @@ public class ProjectViaDp implements Job {
         final int targetHeight = height;
         final int targetRefresh = refresh;
         new Thread(() -> startInternal(
-                targetDisplayId, targetWidth, targetHeight, targetRefresh), TAG).start();
+                targetDisplayId, targetWidth, targetHeight, targetRefresh, generation), TAG).start();
     }
 
-    private void startInternal(int displayId, int width, int height, int refresh) {
+    private void startInternal(int displayId, int width, int height, int refresh, long generation) {
         try {
-            State.ensureUserServiceBound();
-            long deadline = System.currentTimeMillis() + 5000;
-            while (!State.isUserServiceAlive() && System.currentTimeMillis() < deadline) {
-                Thread.sleep(100);
-            }
-            if (!State.isUserServiceAlive()) {
-                State.showErrorStatus("LibreDeX UserService unavailable");
+            if (!UserServiceRecovery.ensureReady(dexSource)) {
+                if (generation != sessionGeneration) return;
+                State.showErrorStatus(State.getContext().getString(R.string.dp_user_service_unavailable));
                 stop();
                 return;
             }
-            if (dexSource) {
-                try {
-                    if (!State.userService.isRooted()) {
-                        State.log(TAG + ": DeX path needs root UserService, "
-                                + "restarting Shizuku as root");
-                        if (!AcquireShizuku.fixRootShizuku()) {
-                            State.showErrorStatus(
-                                    TAG + ": " + State.getContext().getString(R.string.dp_dex_need_root_shizuku));
-                            stop();
-                            State.refreshMainActivity();
-                            return;
-                        }
-                    }
-                } catch (Throwable t) {
-                    State.log(TAG + ": root check failed: " + t.getMessage());
-                    stop();
-                    State.refreshMainActivity();
-                    return;
-                }
+            if (generation != sessionGeneration) return;
+            // The cable may have been removed while recovering the service.
+            ExternalDisplayMonitor.refreshState(State.getContext());
+            if (!active || State.externalDisplayId != displayId) {
+                State.log(TAG + ": display removed while preparing UserService");
+                stop(false);
+                return;
             }
             int resetRc = State.userService.resetDpMirror(displayId);
             State.log(TAG + ": resetDpMirror rc=" + resetRc);
@@ -273,6 +253,7 @@ public class ProjectViaDp implements Job {
                 // needs a Looper.
                 final int inputDisplayId = displayId;
                 new Handler(Looper.getMainLooper()).post(() -> {
+                    if (generation != sessionGeneration) return;
                     InputRouting.bindAllExternalInputToDisplay(inputDisplayId);
                     InputRouting.attachInputDeviceListener(State.getContext(), inputDisplayId);
                 });
@@ -335,15 +316,18 @@ public class ProjectViaDp implements Job {
                 }
                 activeMirror = true;
             }
+            if (generation != sessionGeneration) return;
             SessionLifecycle.start(State.getContext(), ProjectViaDp.class);
             State.log(TAG + ": DP output started source=" + (dexSource ? "dex" : "mirror")
                     + " display=" + displayId + " " + width + "x" + height);
         } catch (Throwable t) {
+            if (generation != sessionGeneration) return;
             State.log(TAG + ": start failed: " + t);
             stop();
             State.refreshMainActivity();
             return;
         }
+        if (generation != sessionGeneration) return;
         ExternalDisplayMonitor.start(State.getContext(), () -> {
             if (active && activeDisplayId >= 0 && State.externalDisplayId != activeDisplayId) {
                 State.log(TAG + ": external display removed, stopping");

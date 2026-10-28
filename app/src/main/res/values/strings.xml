@@ -424,4 +424,7 @@
     <string name="dp_dex_need_root_shizuku">DP DeX needs Shizuku started as root</string>
     <string name="sunshine_auto_fallback">\n\nAutomatically fell back to H.264/AVC. Please reconnect Moonlight.</string>
     <string name="screen_builtin_display">Built-in screen</string>
+    <string name="dp_user_service_unavailable">Could not connect to the LibreDeX helper. Open Shizuku, confirm it is running with root and LibreDeX is authorized, then retry.</string>
+    <string name="dp_auto_notification_channel">Automatic wired DeX</string>
+    <string name="dp_auto_notification_text">Waiting for an external display; DeX starts automatically when connected</string>
 </resources>

@@ -6,8 +6,8 @@ param(
     [string]$Configuration = 'Debug',
     [switch]$Install,
     [string]$Apksigner = '',
-    [string]$VersionName = '0.2.6',
-    [int]$VersionCode = 26,
+    [string]$VersionName = '0.2.21-stability.1',
+    [int]$VersionCode = 267,
     [string]$OptionalTransportModule = '',
     [string]$OptionalTransportProvider = ''
 )
@@ -86,7 +86,8 @@ if ($Configuration -eq 'Release') {
 if ($Install) {
     adb install -r $outputApk
     if ($LASTEXITCODE -ne 0) { throw 'adb install failed' }
-    $installedBadging = (& adb shell dumpsys package com.libredex) -join "`n"
+    $applicationId = if ($Configuration -eq 'Debug') { 'com.libredex.debug' } else { 'com.libredex' }
+    $installedBadging = (& adb shell dumpsys package $applicationId) -join "`n"
     if ($installedBadging -notmatch "versionName=$VersionName") {
         throw "installed version mismatch, expected $VersionName"
     }

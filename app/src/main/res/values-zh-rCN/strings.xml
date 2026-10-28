@@ -424,4 +424,7 @@
     <string name="dp_dex_need_root_shizuku">DP DeX 需要以 root 启动 Shizuku</string>
     <string name="sunshine_auto_fallback">\n\n已自动回退到 H.264/AVC，请重新连接 Moonlight。</string>
     <string name="screen_builtin_display">内置屏幕</string>
+    <string name="dp_user_service_unavailable">无法连接 LibreDeX 辅助服务。请打开 Shizuku，确认以 Root 运行且已授权 LibreDeX，然后重试。</string>
+    <string name="dp_auto_notification_channel">有线 DeX 自动启动</string>
+    <string name="dp_auto_notification_text">正在监听外接屏，连接后自动启动 DeX</string>
 </resources>

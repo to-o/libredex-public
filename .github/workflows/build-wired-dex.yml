@@ -1,0 +1,48 @@
+name: Validate wired DeX startup
+
+on:
+  pull_request:
+    paths: ['app/**', 'xposed-stubs/**', 'hidden-api-stub/**', 'scripts/check_i18n_consistency.py', '.github/workflows/build-wired-dex.yml']
+  workflow_dispatch:
+
+permissions:
+  contents: read
+
+jobs:
+  build:
+    runs-on: ubuntu-latest
+    timeout-minutes: 20
+    steps:
+      - uses: actions/checkout@v4
+      - uses: actions/setup-java@v4
+        with:
+          distribution: temurin
+          java-version: '17'
+      - uses: android-actions/setup-android@v3
+        with:
+          packages: platform-tools
+          log-accepted-android-sdk-licenses: false
+      - uses: gradle/actions/setup-gradle@v4
+      - name: Install Android SDK
+        run: sdkmanager 'platforms;android-34' 'build-tools;34.0.0'
+      - name: Reuse verified unchanged release native engine
+        run: |
+          curl --fail --location --retry 3 -o upstream.apk https://github.com/KanzakiK/libredex-public/releases/download/v0.2.20/libredex-0.2.20-release.apk
+          echo 'e698bb08ed9d0fd50e16d9140b92608ee33bd4de01da19716ef270e412a2a0ed  upstream.apk' | sha256sum --check
+          mkdir -p "$RUNNER_TEMP/native/arm64-v8a"
+          unzip -p upstream.apk lib/arm64-v8a/libsunshine_android.so > "$RUNNER_TEMP/native/arm64-v8a/libsunshine_android.so"
+          rm upstream.apk
+      - name: Test and build
+        run: |
+          chmod +x gradlew
+          python scripts/check_i18n_consistency.py
+          ./gradlew :xposed-stubs:test :app:testDebugUnitTest :app:assembleDebug :caption-fix:testDebugUnitTest -PlibredexPrebuiltNativeDir="$RUNNER_TEMP/native" --no-daemon --stacktrace
+          sha256sum app/build/outputs/apk/debug/*.apk > app/build/outputs/apk/debug/SHA256SUMS.txt
+      - uses: actions/upload-artifact@v4
+        with:
+          name: libredex-wired-startup-${{ github.sha }}
+          path: |
+            app/build/outputs/apk/debug/*.apk
+            app/build/outputs/apk/debug/SHA256SUMS.txt
+            app/build/test-results/testDebugUnitTest/*.xml
+            xposed-stubs/build/test-results/test/*.xml
