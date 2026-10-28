@@ -1,13 +1,33 @@
 package com.connect_screen.mirror;
 
 import android.app.Application;
+import android.content.Context;
+import android.os.Build;
+import android.util.Log;
 
 import com.connect_screen.mirror.transport.TransportRegistry;
 
 import rikka.shizuku.Shizuku;
+import org.lsposed.hiddenapibypass.HiddenApiBypass;
 
 public class LibreDeXApp extends Application {
     public static LibreDeXApp instance;
+
+    @Override
+    protected void attachBaseContext(Context base) {
+        super.attachBaseContext(base);
+        // Boot receivers/services run without MirrorMainActivity. Initialize
+        // access before any of them resolve the privileged framework methods.
+        if (Build.VERSION.SDK_INT >= Build.VERSION_CODES.P) {
+            try {
+                HiddenApiBypass.addHiddenApiExemptions("");
+                Log.i("LibreDeXApp", "Hidden API access initialized for background startup");
+            } catch (Throwable t) {
+                Log.w("LibreDeXApp", "Hidden API initialization failed", t);
+            }
+        }
+    }
+
     @Override
     public void onCreate() {
         super.onCreate();

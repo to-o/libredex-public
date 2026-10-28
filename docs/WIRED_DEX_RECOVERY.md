@@ -28,6 +28,12 @@ On Samsung firmware, allow LibreDeX unrestricted background operation in its
 app battery settings before testing automatic startup. A foreground service
 cannot undo Samsung MARs force-stopping an app configured as restricted.
 
+Framework access is initialized in Application.attachBaseContext, including
+receiver/service-only starts. Initializing it only in the activity caused
+boot-started input routing to throw NoSuchMethodError and restart the app.
+Input device enumeration uses public InputDevice APIs; privileged IPC is
+reserved for the routing changes themselves.
+
 The existing **Automatically start DeX when connected** switch is opt-in. When
 enabled, a `specialUse` foreground service owns the cable listener and displays
 a notification. It does not require screen-capture permission just to monitor
