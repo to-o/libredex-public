@@ -1018,19 +1018,9 @@ public final class DexLayerStackHook implements IXposedHookLoadPackage {
     }
 
     /**
-     * Remove Dex root tasks only from the captured retired DisplayContent.
-     *
-     * THREE-STAGE STRATEGY (fix35):
-     * 1. Collect root Task nodes on the **specific Dex display** we tracked
-     *    (via an immutable cleanup request, never the current configured ID).
-     * 2. removeImmediately each Task (STEP 2).
-     * 3. Null out the TaskDisplayArea HOME task template fields
-     *    (mCanHostHomeTask=false, mRootHomeTask=null, mTmpHomeChildren.clear)
-     *    so WMS cannot respawn SecondaryLauncher after our cleanup.
-     *
-     * A reactivated ID invalidates its old request. A replaced DisplayContent
-     * invalidates the captured object even if Android reuses the numeric ID.
-     * Tasks already migrated elsewhere are deliberately outside this cleanup.
+     * Remove the retired display's HOME through the WMS lifecycle. Shell-created
+     * desk roots and ordinary application tasks belong to their existing owners.
+     * A reactivated ID or replaced DisplayContent invalidates the request.
      */
     private static void cleanupAllDexRootTasks(DpDisplayCleanupState.Request request,
             Object wms, Object retiredDisplay) {
@@ -1063,24 +1053,13 @@ public final class DexLayerStackHook implements IXposedHookLoadPackage {
             java.util.Set<Integer> seenIds = new java.util.HashSet<>();
             java.util.List<Object> allDescendants = new java.util.ArrayList<>();
             java.util.List<Integer> nodeDisplayIds = new java.util.ArrayList<>();
-            // Also collect Dex display TaskDisplayAreas for Step 3 (kill HOME template)
-            java.util.List<Object> dexTDAs = new java.util.ArrayList<>();
-            java.util.Set<Integer> seenTDADisplays = new java.util.HashSet<>();
             collectAllChildrenWithContext(retiredDisplay, dexDisplayId, allDescendants, nodeDisplayIds);
 
             for (int i = 0; i < allDescendants.size(); i++) {
                 Object wc = allDescendants.get(i);
                 int contextDisplayId = nodeDisplayIds.get(i);
                 if (wc == null) continue;
-                // Collect Dex-display TaskDisplayAreas for Step 3
-                String cn = wc.getClass().getName();
-                if (cn.contains("TaskDisplayArea") && contextDisplayId == dexDisplayId
-                        && !seenTDADisplays.contains(contextDisplayId)) {
-                    dexTDAs.add(wc);
-                    seenTDADisplays.add(contextDisplayId);
-                }
-
-                if (!isTaskNode(wc)) continue;
+                if (!isTaskNode(wc) || !mayRemoveRetiredHome(wc, dexDisplayId, contextDisplayId)) continue;
 
                 // Get taskId via mTaskId field
                 int taskId = -1;
@@ -1116,45 +1095,6 @@ public final class DexLayerStackHook implements IXposedHookLoadPackage {
             XposedBridge.log(TAG + ": cleanupAllDexRootTasks done: removed "
                     + removed + "/" + toRemove.size());
 
-            // STEP 3: Kill the HOME task template on Dex TDAs so WMS cannot respawn SecondaryLauncher
-            for (Object tda : dexTDAs) {
-                try {
-                    // Set mCanHostHomeTask = false
-                    try {
-                        java.lang.reflect.Field f = tda.getClass().getDeclaredField("mCanHostHomeTask");
-                        f.setAccessible(true);
-                        f.set(tda, false);
-                        XposedBridge.log(TAG + ":  STEP3 mCanHostHomeTask=false on " + tda.getClass().getSimpleName());
-                    } catch (Throwable t) {
-                        XposedBridge.log(TAG + ":  STEP3 mCanHostHomeTask failed: " + t.getMessage());
-                    }
-                    // Set mRootHomeTask = null (kills the template)
-                    try {
-                        java.lang.reflect.Field f = tda.getClass().getDeclaredField("mRootHomeTask");
-                        f.setAccessible(true);
-                        Object oldVal = f.get(tda);
-                        f.set(tda, null);
-                        XposedBridge.log(TAG + ":  STEP3 mRootHomeTask set null (was "
-                                + (oldVal == null ? "null" : oldVal.getClass().getSimpleName()) + ")");
-                    } catch (Throwable t) {
-                        XposedBridge.log(TAG + ":  STEP3 mRootHomeTask failed: " + t.getMessage());
-                    }
-                    // Set mTmpHomeChildren = empty
-                    try {
-                        java.lang.reflect.Field f = tda.getClass().getDeclaredField("mTmpHomeChildren");
-                        f.setAccessible(true);
-                        Object list = f.get(tda);
-                        if (list instanceof java.util.Collection) {
-                            ((java.util.Collection<?>) list).clear();
-                            XposedBridge.log(TAG + ":  STEP3 mTmpHomeChildren cleared");
-                        }
-                    } catch (Throwable t) {
-                        XposedBridge.log(TAG + ":  STEP3 mTmpHomeChildren failed: " + t.getMessage());
-                    }
-                } catch (Throwable t) {
-                    XposedBridge.log(TAG + ": cleanupAllDexRootTasks STEP3 FAILED: " + t);
-                }
-            }
         } catch (Throwable t) {
             XposedBridge.log(TAG + ": cleanupAllDexRootTasks FAILED: " + t);
         }
@@ -1202,18 +1142,28 @@ public final class DexLayerStackHook implements IXposedHookLoadPackage {
     }
 
 
+    private static boolean mayRemoveRetiredHome(Object task, int retiredDisplayId, int taskDisplayId) {
+        try {
+            int activityType = (Integer) task.getClass().getMethod("getActivityType").invoke(task);
+            Field field = findDeclaredField(task.getClass(), "mCreatedByOrganizer");
+            Boolean organized = field == null ? null : field.getBoolean(task);
+            boolean remove = DpTaskCleanupPolicy.shouldRemove(
+                    retiredDisplayId, taskDisplayId, activityType, organized);
+            if (!remove) {
+                XposedBridge.log(TAG + ": preserved task owned by app/organizer " + describeTask(task));
+            }
+            return remove;
+        } catch (Throwable t) {
+            XposedBridge.log(TAG + ": unknown task ownership; preserving " + describeTask(task));
+            return false;
+        }
+    }
+
     private static boolean removeRootTaskSafely(Object rootTask) {
         try {
             XposedBridge.log(TAG + ": removing " + describeTask(rootTask));
-            // Android 16: removeImmediately() is the official path for WindowContainer
-            try {
-                Method removeImmediately = rootTask.getClass().getMethod("removeImmediately");
-                removeImmediately.invoke(rootTask);
-                XposedBridge.log(TAG + ":  removed via removeImmediately");
-                return true;
-            } catch (NoSuchMethodException ignored) {
-                // Fallback to removeIfPossible
-            }
+            // Respect WMS transitions/organizer callbacks instead of forcefully
+            // detaching SurfaceControls while Shell still refers to the task.
             Method removeIfPossible = rootTask.getClass().getMethod("removeIfPossible");
             removeIfPossible.invoke(rootTask);
             XposedBridge.log(TAG + ":  removed via removeIfPossible");
