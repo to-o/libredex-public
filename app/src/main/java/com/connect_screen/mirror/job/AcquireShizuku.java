@@ -38,7 +38,7 @@ public class AcquireShizuku implements Job {
         }
     }
 
-    public static boolean fixRootShizuku() {
+    public static synchronized boolean fixRootShizuku() {
         try {
             if (State.userService != null && State.userService.isRooted()) {
                 State.log("UserService already running as root");

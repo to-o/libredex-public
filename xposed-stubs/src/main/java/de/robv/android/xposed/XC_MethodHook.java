@@ -11,13 +11,8 @@ public class XC_MethodHook {
             this.result = result;
         }
 
-        public void setResult(boolean result) {
-            this.result = result;
-        }
-
-        public void setResult(int result) {
-            this.result = result;
-        }
+        // The runtime Xposed API only has setResult(Object). Primitive overloads
+        // compile to descriptors absent in LSPosed/Vector and fail at hook time.
     }
 
     protected void beforeHookedMethod(MethodHookParam param) throws Throwable {

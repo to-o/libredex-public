@@ -4,10 +4,10 @@ import android.content.Context;
 import android.hardware.display.DisplayManager;
 import android.os.Handler;
 import android.os.Looper;
-import android.os.SystemClock;
 
 import com.connect_screen.mirror.job.ExternalDisplayMonitor;
 import com.connect_screen.mirror.job.ProjectViaDp;
+import com.connect_screen.mirror.job.DpHotplugPolicy;
 import com.connect_screen.mirror.job.SunshineServer;
 import com.connect_screen.mirror.transport.TransportRegistry;
 
@@ -20,8 +20,8 @@ import com.connect_screen.mirror.transport.TransportRegistry;
  * event into a real DeX desktop. Calling this with the user-chosen source
  * (mirror) would just re-do what the OS already does, so we always launch DeX.
  *
- * Attach/detach mirror app foreground (MirrorMainActivity onResume/onPause) so a
- * plug in the background does not surprise-start DeX on the external screen.
+ * Owned by the opt-in foreground service, so backgrounding the activity does
+ * not discard cable events. The persistent notification exposes that behavior.
  */
 public final class DpAutoSwitch {
     private static final String TAG = "DpAutoSwitch";
@@ -31,8 +31,8 @@ public final class DpAutoSwitch {
     private static Handler mainHandler;
     private static DisplayManager.DisplayListener displayListener;
     private static boolean attached;
-    private static boolean lastHadExternal;
-    private static long lastActionAt;
+    private static DpHotplugPolicy policy = new DpHotplugPolicy();
+    private static final Runnable CHECK_DISPLAY = DpAutoSwitch::checkDisplay;
 
     private DpAutoSwitch() {
     }
@@ -48,7 +48,7 @@ public final class DpAutoSwitch {
         if (dm == null) {
             return;
         }
-        lastHadExternal = hasExternal();
+        policy = new DpHotplugPolicy();
         displayListener = new DisplayManager.DisplayListener() {
             @Override
             public void onDisplayAdded(int displayId) {
@@ -67,6 +67,9 @@ public final class DpAutoSwitch {
         };
         dm.registerDisplayListener(displayListener, mainHandler);
         attached = true;
+        // A display already connected at app/service startup needs the same
+        // transition as a fresh plug event (including after reboot).
+        mainHandler.postDelayed(CHECK_DISPLAY, DEBOUNCE_MS);
     }
 
     public static void detach() {
@@ -85,6 +88,10 @@ public final class DpAutoSwitch {
             State.log(TAG + ": detach failed: " + t.getMessage());
         }
         displayListener = null;
+        if (mainHandler != null) {
+            mainHandler.removeCallbacks(CHECK_DISPLAY);
+            mainHandler.removeCallbacksAndMessages(null);
+        }
         mainHandler = null;
         attached = false;
     }
@@ -93,26 +100,26 @@ public final class DpAutoSwitch {
         if (!Pref.getAutoDexOnHotplug()) {
             // Keep edge state accurate even while disabled, so a later toggle-on
             // doesn't mistake an already-present display for a fresh plug.
-            lastHadExternal = hasExternal();
+            hasExternal();
+            policy.update(State.externalDisplayId);
             return;
         }
-        mainHandler.post(() -> {
-            long now = SystemClock.uptimeMillis();
-            if (now - lastActionAt < DEBOUNCE_MS) {
-                return;
-            }
-            boolean nowExternal = hasExternal();
-            if (nowExternal == lastHadExternal) {
-                return;
-            }
-            lastHadExternal = nowExternal;
-            lastActionAt = now;
-            if (nowExternal) {
-                onPlug();
-            } else {
-                onUnplug();
-            }
-        });
+        // Debounce the last event, rather than dropping events during a time
+        // window: a quick unplug/replug must not lose the unplug edge forever.
+        mainHandler.removeCallbacks(CHECK_DISPLAY);
+        mainHandler.postDelayed(CHECK_DISPLAY, DEBOUNCE_MS);
+    }
+
+    private static void checkDisplay() {
+        if (!attached || !Pref.getAutoDexOnHotplug()) return;
+        hasExternal();
+        DpHotplugPolicy.Change change = policy.update(State.externalDisplayId);
+        if (change == DpHotplugPolicy.Change.DISCONNECT || change == DpHotplugPolicy.Change.REPLACE) {
+            onUnplug();
+        }
+        if (change == DpHotplugPolicy.Change.CONNECT || change == DpHotplugPolicy.Change.REPLACE) {
+            onPlug();
+        }
     }
 
     private static boolean hasExternal() {
@@ -121,6 +128,7 @@ public final class DpAutoSwitch {
     }
 
     private static void onPlug() {
+        if (!attached || !Pref.getAutoDexOnHotplug() || !hasExternal()) return;
         if (ProjectViaDp.isActive()
                 || SunshineServer.isMoonlightSessionActive()
                 || TransportRegistry.isOptionalActive()) {

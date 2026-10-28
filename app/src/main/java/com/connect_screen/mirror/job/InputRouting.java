@@ -106,9 +106,14 @@ public class InputRouting {
         }
         DisplayInfo displayInfo = ServiceUtils.getDisplayManager().getDisplayInfo(displayId);
         IInputManager inputManager = ServiceUtils.getInputManager();
+        if (inputManager == null) {
+            State.log("Input service unavailable; skipping peripheral binding");
+            return;
+        }
         Map<String, String> inputDeviceDescriptorToPortMap = InputRouting.getInputDeviceDescriptorToPortMap();
-        for (int deviceId : inputManager.getInputDeviceIds()) {
-            InputDevice inputDevice = inputManager.getInputDevice(deviceId);
+        // Device enumeration is public API; only routing needs privileged IPC.
+        for (int deviceId : InputDevice.getDeviceIds()) {
+            InputDevice inputDevice = InputDevice.getDevice(deviceId);
             InputRouting.bindInputToDisplay(displayInfo, inputDevice, inputManager, inputDeviceDescriptorToPortMap);
         }
     }
@@ -135,8 +140,8 @@ public class InputRouting {
             return;
         }
         Map<String, String> descriptorToPort = InputRouting.getInputDeviceDescriptorToPortMap();
-        for (int deviceId : inputManager.getInputDeviceIds()) {
-            InputDevice inputDevice = inputManager.getInputDevice(deviceId);
+        for (int deviceId : InputDevice.getDeviceIds()) {
+            InputDevice inputDevice = InputDevice.getDevice(deviceId);
             if (inputDevice == null || !inputDevice.isExternal()) {
                 continue;
             }
@@ -217,7 +222,7 @@ public class InputRouting {
                         if (manager == null) {
                             return;
                         }
-                        InputDevice device = manager.getInputDevice(deviceId);
+                        InputDevice device = InputDevice.getDevice(deviceId);
                         if (device != null && device.isExternal()) {
                             bindInputToDisplay(
                                     ServiceUtils.getDisplayManager().getDisplayInfo(target),

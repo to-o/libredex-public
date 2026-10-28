@@ -137,6 +137,7 @@ public class ConnectionFragment extends Fragment {
     private String currentTransport = "moonlight";
     private String currentSource = OutputSource.getActive().id();
     private boolean hideFirstUse = false;
+    private boolean subPageOpen;
 
     @Nullable
     @Override
@@ -242,8 +243,10 @@ public class ConnectionFragment extends Fragment {
                 Pref.getPreferences().edit().putBoolean(Pref.KEY_AUTO_CONNECT_CLIENT, isChecked).apply());
 
         autoDexSwitch.setChecked(Pref.getAutoDexOnHotplug());
-        autoDexSwitch.setOnCheckedChangeListener((buttonView, isChecked) ->
-                Pref.setAutoDexOnHotplug(isChecked));
+        autoDexSwitch.setOnCheckedChangeListener((buttonView, isChecked) -> {
+            Pref.setAutoDexOnHotplug(isChecked);
+            DpAutoSwitchService.update(requireContext());
+        });
         clientSpinner.setAdapter(new ArrayAdapter<>(
                 requireContext(),
                 android.R.layout.simple_spinner_dropdown_item,
@@ -263,6 +266,7 @@ public class ConnectionFragment extends Fragment {
         if (subPageContainer == null) {
             return;
         }
+        subPageOpen = true;
         transportTabsLayout.setVisibility(View.GONE);
         moonlightContent.setVisibility(View.GONE);
         placeholderContent.setVisibility(View.GONE);
@@ -288,6 +292,7 @@ public class ConnectionFragment extends Fragment {
     }
 
     private void closeSubPage() {
+        subPageOpen = false;
         subPageContainer.removeAllViews();
         subPageContainer.setVisibility(View.GONE);
         transportTabsLayout.setVisibility(View.VISIBLE);
@@ -457,7 +462,9 @@ public class ConnectionFragment extends Fragment {
     }
 
     void syncTransportWithActiveSession() {
-        String target = "moonlight";
+        // Keep the selected transport while idle; resuming the page must not
+        // silently switch a pending DP start back to Moonlight.
+        String target = currentTransport;
         if (ProjectViaDp.isActive()) {
             target = "dp";
         } else if (TransportRegistry.isOptionalActive()) {
@@ -476,6 +483,15 @@ public class ConnectionFragment extends Fragment {
     }
 
     private void applyTransport() {
+        // A display event/onResume must not resurrect the connection cards
+        // beneath an open settings page and leave the transport tabs hidden.
+        transportTabsLayout.setVisibility(subPageOpen ? View.GONE : View.VISIBLE);
+        if (subPageOpen) {
+            moonlightContent.setVisibility(View.GONE);
+            placeholderContent.setVisibility(View.GONE);
+            if (sharedCardsContainer != null) sharedCardsContainer.setVisibility(View.GONE);
+            return;
+        }
         setTabButton(transportMoonlight, "moonlight".equals(currentTransport));
         setTabButton(transportDp, "dp".equals(currentTransport));
         OptionalTransportProvider optional = TransportRegistry.optional();
@@ -553,6 +569,7 @@ public class ConnectionFragment extends Fragment {
 
     @Override
     public void onDestroyView() {
+        subPageOpen = false;
         detachOptionalFragment();
         super.onDestroyView();
     }

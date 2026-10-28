@@ -207,13 +207,12 @@ public class MirrorMainActivity extends AppCompatActivity implements IMainActivi
             State.startNewJob(new AcquireShizuku());
         }
         // Wired-DP auto-switch: only while the app is foreground.
-        DpAutoSwitch.attach(this);
+        DpAutoSwitchService.update(this);
     }
 
     @Override
     protected void onPause() {
         super.onPause();
-        DpAutoSwitch.detach();
     }
 
     @Override

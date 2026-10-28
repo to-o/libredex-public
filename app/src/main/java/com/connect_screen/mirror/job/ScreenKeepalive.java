@@ -26,7 +26,7 @@ public final class ScreenKeepalive {
     private static final Map<Object, Runnable> AUTO_SCREEN_OFF =
             new ConcurrentHashMap<>();
     private static int savedScreenOffTimeout = -1;
-    private static boolean keepScreenOnRequested = false;
+    private static volatile boolean keepScreenOnRequested = false;
 
     /**
      * Keep the app window on only while a projection session is active, instead
@@ -44,6 +44,10 @@ public final class ScreenKeepalive {
     }
 
     private static void applyKeepScreenOn() {
+        if (Looper.myLooper() != Looper.getMainLooper()) {
+            MAIN_HANDLER.post(ScreenKeepalive::applyKeepScreenOn);
+            return;
+        }
         try {
             android.app.Activity activity = State.getCurrentActivity();
             if (activity == null) {
