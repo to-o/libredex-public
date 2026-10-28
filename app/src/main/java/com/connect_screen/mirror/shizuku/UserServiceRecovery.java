@@ -72,6 +72,15 @@ public final class UserServiceRecovery {
             State.log("UserService bind failed, removing stale record (attempt " + (attempt + 1) + ")");
             State.unbindUserService();
         }
+        // A live server binder does not guarantee that the manager and client
+        // use the same server. Concurrent boot starts were observed to leave
+        // two root servers and reject helper tokens. For root-required DeX,
+        // use the official starter once after ordinary binding retries; it
+        // replaces the stale servers and then verifies a real root helper.
+        if (requireRoot) {
+            State.log("UserService retries exhausted; restarting root Shizuku once");
+            return AcquireShizuku.fixRootShizuku();
+        }
         return false;
     }
 }

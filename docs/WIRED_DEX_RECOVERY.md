@@ -17,6 +17,17 @@ its live binder and timeout decide readiness. The UI remains responsive while th
 an actionable message directing the user to Shizuku rather than reporting a
 running DeX session.
 
+For root-required DeX, two unsuccessful helper bindings are followed by one
+restart through Shizuku's official root starter and a real helper/root check.
+This also recovers the observed case of two boot-started Shizuku servers whose
+client and manager binders disagree and reject the helper token. Root restarts
+inside LibreDeX are serialized. Ordinary mirroring does not trigger this final
+root restart.
+
+On Samsung firmware, allow LibreDeX unrestricted background operation in its
+app battery settings before testing automatic startup. A foreground service
+cannot undo Samsung MARs force-stopping an app configured as restricted.
+
 The existing **Automatically start DeX when connected** switch is opt-in. When
 enabled, a `specialUse` foreground service owns the cable listener and displays
 a notification. It does not require screen-capture permission just to monitor
