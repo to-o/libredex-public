@@ -42,10 +42,10 @@ public final class DexLayerStackHook implements IXposedHookLoadPackage {
     private static volatile boolean homeSupportGuardInstalled;
     private static Object inputManagerService;
     private static Object systemUiTouchpadController;
-    private static Object windowManagerService;
+    private static volatile Object windowManagerService;
     private static Object logicalDisplayMapper;
     private static ClassLoader systemServerClassLoader;
-    private static volatile int lastConfiguredDpDisplayId = -1;
+    private static final DpDisplayCleanupState DP_CLEANUP_STATE = new DpDisplayCleanupState();
     private static volatile boolean tdaDisplayIdFallbackLogged;
     private static volatile boolean bootDpStateCleanupDone;
 
@@ -886,39 +886,60 @@ public final class DexLayerStackHook implements IXposedHookLoadPackage {
     }
 
     private static void syncConfiguredDpDisplay() {
-        int configured = configuredDpDisplayId();
-        int previous = lastConfiguredDpDisplayId;
-        if (previous == configured) {
-            return;
-        }
-        if (previous >= 0 && previous != configured) {
+        DpDisplayCleanupState.Request request = DP_CLEANUP_STATE.observe(configuredDpDisplayId());
+        if (request != null) {
+            final int previous = request.displayId;
             DEX_FLAG_DISPLAY_IDS.remove(previous);
             DEX_MODE_NOTIFIED.remove(previous);
             DEX_ELIGIBLE_NOTIFIED.remove(previous);
             DEX_DEXCONTROLLER_NOTIFIED.remove(previous);
             WALLPAPER_ATTACH_DONE.remove(previous);
             setLogicalDisplayCanHostTasks(previous, false);
-            unmarkHomeSupported(previous);
-            resetDexController(previous);
-            restoreDpTaskDisplayArea(previous);
-            // DexController and TDA state are reset above, but the actual root
-            // tasks created by Dex mode (activatable, minimized, freeform) are
-            // NOT automatically removed. When a display is destroyed these tasks
-            // get migrated to the next surviving display (phone mirror VD or main
-            // display) — they remain invisible but still on the layer stack,
-            // causing "Dex画面叠在镜像下方" symptom. Clean them up now.
-            // IMPORTANT: cleanupAllDexRootTasks calls removeImmediately() which
-            // tears down Task SurfaceControls. The caller (DMS hook, display thread)
-            // and the caller of this hook chain may still hold SurfaceControl refs
-            // that are being processed by WindowAnimator on the android.anim thread.
-            // If we run removeImmediately() synchronously here, the next frame's
-            // WindowAnimator.animate() hits a null SurfaceControl → NPE → system_server
-            // crash. Post 300ms so the current frame drains first.
+            // This hook can run with a DMS lock held. Never acquire the WMS lock
+            // here: post the WMS phase so the two locks cannot be inverted.
             android.os.Handler mainHandler = new android.os.Handler(android.os.Looper.getMainLooper());
-            mainHandler.postDelayed(() -> cleanupAllDexRootTasks(), 300);
+            mainHandler.post(() -> prepareDpTaskCleanup(request, mainHandler));
             XposedBridge.log(TAG + ": dp dex cleared displayId=" + previous);
         }
-        lastConfiguredDpDisplayId = configured;
+    }
+
+    private static Object displayContent(Object wms, int displayId) throws Exception {
+        Object root = XposedHelpers.getObjectField(wms, "mRoot");
+        return root == null ? null : root.getClass().getMethod(
+                "getDisplayContent", int.class).invoke(root, displayId);
+    }
+
+    private static void prepareDpTaskCleanup(DpDisplayCleanupState.Request request, Handler handler) {
+        try {
+            Object wms = windowManagerService;
+            if (wms == null) {
+                DP_CLEANUP_STATE.finish(request);
+                return;
+            }
+            Object lock = XposedHelpers.getObjectField(wms, "mGlobalLock");
+            if (lock == null) throw new IllegalStateException("WMS global lock unavailable");
+            synchronized (lock) {
+                if (!DP_CLEANUP_STATE.isPending(request, configuredDpDisplayId())) {
+                    DP_CLEANUP_STATE.finish(request);
+                    return;
+                }
+                Object retiredDisplay = displayContent(wms, request.displayId);
+                unmarkHomeSupported(request.displayId);
+                resetDexController(request.displayId);
+                restoreDpTaskDisplayArea(request.displayId);
+                if (retiredDisplay == null) {
+                    XposedBridge.log(TAG + ": retired DP display already removed displayId=" + request.displayId);
+                    DP_CLEANUP_STATE.finish(request);
+                    return;
+                }
+                // Retain the existing frame-drain delay. The destructive phase
+                // also takes the WMS lock and verifies the captured display object.
+                handler.postDelayed(() -> cleanupAllDexRootTasks(request, wms, retiredDisplay), 300);
+            }
+        } catch (Throwable t) {
+            DP_CLEANUP_STATE.finish(request);
+            XposedBridge.log(TAG + ": prepare DP cleanup failed displayId=" + request.displayId + " " + t);
+        }
     }
 
     private static void removeHomeRootTask(int displayId) {
@@ -997,37 +1018,44 @@ public final class DexLayerStackHook implements IXposedHookLoadPackage {
     }
 
     /**
-     * Remove ALL Dex root tasks across every surviving DisplayContent.
+     * Remove Dex root tasks only from the captured retired DisplayContent.
      *
      * THREE-STAGE STRATEGY (fix35):
-     * 1. Collect all Task nodes on the **specific Dex display** we tracked
-     *    (via lastConfiguredDpDisplayId — dynamic, NOT hardcoded >= 6).
+     * 1. Collect root Task nodes on the **specific Dex display** we tracked
+     *    (via an immutable cleanup request, never the current configured ID).
      * 2. removeImmediately each Task (STEP 2).
      * 3. Null out the TaskDisplayArea HOME task template fields
      *    (mCanHostHomeTask=false, mRootHomeTask=null, mTmpHomeChildren.clear)
      *    so WMS cannot respawn SecondaryLauncher after our cleanup.
      *
-     * WHY LAST_CONFIGURED_DP_DISPLAY_ID, NOT >= 6?
-     * Android displayId is dynamically assigned, not fixed. The Dex physical
-     * DP/HDMI display might be ID 6 today, ID 7 tomorrow, ID 12 after reboot.
-     * We already track the exact Dex display ID in syncConfiguredDpDisplay()
-     * via DEX_FLAG_DISPLAY_IDS + lastConfiguredDpDisplayId — use that instead.
+     * A reactivated ID invalidates its old request. A replaced DisplayContent
+     * invalidates the captured object even if Android reuses the numeric ID.
+     * Tasks already migrated elsewhere are deliberately outside this cleanup.
      */
-    private static void cleanupAllDexRootTasks() {
+    private static void cleanupAllDexRootTasks(DpDisplayCleanupState.Request request,
+            Object wms, Object retiredDisplay) {
         try {
-            Object wms = windowManagerService;
-            if (wms == null) return;
-            Object root = XposedHelpers.getObjectField(wms, "mRoot");
-            if (root == null) return;
-
-            // STEP 1: Find ALL Task nodes on the specific Dex display we tracked
-            // Use lastConfiguredDpDisplayId — this is the EXACT display that was
-            // previously used for Dex mode and needs cleanup now.
-            final int dexDisplayId = lastConfiguredDpDisplayId;
-            if (dexDisplayId < 0) {
-                XposedBridge.log(TAG + ": cleanupAllDexRootTasks: no known Dex display ID");
-                return;
+            Object lock = XposedHelpers.getObjectField(wms, "mGlobalLock");
+            if (lock == null) throw new IllegalStateException("WMS global lock unavailable");
+            synchronized (lock) {
+                if (!DP_CLEANUP_STATE.isPending(request, configuredDpDisplayId())
+                        || windowManagerService != wms
+                        || displayContent(wms, request.displayId) != retiredDisplay) {
+                    XposedBridge.log(TAG + ": skipped stale DP cleanup displayId=" + request.displayId);
+                    return;
+                }
+                cleanupRetiredDpDisplayLocked(request.displayId, retiredDisplay);
             }
+        } catch (Throwable t) {
+            XposedBridge.log(TAG + ": cleanupAllDexRootTasks FAILED: " + t);
+        } finally {
+            DP_CLEANUP_STATE.finish(request);
+        }
+    }
+
+    /** Caller holds WMS.mGlobalLock; only this retired display's subtree is inspected. */
+    private static void cleanupRetiredDpDisplayLocked(int dexDisplayId, Object retiredDisplay) {
+        try {
             XposedBridge.log(TAG + ":  target Dex displayId=" + dexDisplayId);
 
             // Use ONLY mChildren field reflection — no getter methods!
@@ -1038,7 +1066,7 @@ public final class DexLayerStackHook implements IXposedHookLoadPackage {
             // Also collect Dex display TaskDisplayAreas for Step 3 (kill HOME template)
             java.util.List<Object> dexTDAs = new java.util.ArrayList<>();
             java.util.Set<Integer> seenTDADisplays = new java.util.HashSet<>();
-            collectAllChildrenWithContext(root, -1, allDescendants, nodeDisplayIds);
+            collectAllChildrenWithContext(retiredDisplay, dexDisplayId, allDescendants, nodeDisplayIds);
 
             for (int i = 0; i < allDescendants.size(); i++) {
                 Object wc = allDescendants.get(i);
@@ -1052,12 +1080,7 @@ public final class DexLayerStackHook implements IXposedHookLoadPackage {
                     seenTDADisplays.add(contextDisplayId);
                 }
 
-                // Is this a Task? (class name contains "Task" but not TaskDisplayArea/TaskFragment/ActivityRecord)
-                if (!cn.contains(".Task") && !cn.endsWith("Task")) continue;
-                if (cn.contains("TaskDisplayArea")) continue;
-                if (cn.contains("TaskFragment")) continue;
-                if (cn.contains("ActivityRecord")) continue;
-                if (cn.contains("WindowState")) continue;
+                if (!isTaskNode(wc)) continue;
 
                 // Get taskId via mTaskId field
                 int taskId = -1;
@@ -1163,8 +1186,19 @@ public final class DexLayerStackHook implements IXposedHookLoadPackage {
             if (child == null) continue;
             out.add(child);
             displayIds.add(currentDisplayId);
-            collectAllChildrenWithContext(child, currentDisplayId, out, displayIds);
+            // Removing a root task removes its subtree. Never enqueue its child
+            // tasks too, or removal would touch already-detached surfaces twice.
+            if (!isTaskNode(child)) {
+                collectAllChildrenWithContext(child, currentDisplayId, out, displayIds);
+            }
         }
+    }
+
+    private static boolean isTaskNode(Object node) {
+        String name = node.getClass().getName();
+        return (name.contains(".Task") || name.endsWith("Task"))
+                && !name.contains("TaskDisplayArea") && !name.contains("TaskFragment")
+                && !name.contains("ActivityRecord") && !name.contains("WindowState");
     }
 
 
@@ -1431,6 +1465,13 @@ public final class DexLayerStackHook implements IXposedHookLoadPackage {
             }
             Object atm = XposedHelpers.getObjectField(windowManagerService, "mAtmService");
             Object dexController = XposedHelpers.getObjectField(atm, "mDexController");
+            java.lang.reflect.Field primaryDisplayField = dexController.getClass()
+                    .getDeclaredField("mPrimaryExternalDesktopDisplayId");
+            primaryDisplayField.setAccessible(true);
+            if (primaryDisplayField.getInt(dexController) != displayId) {
+                // A replacement display may already have registered itself.
+                return;
+            }
             Method setExternal = findSetExternalDesktopDisplayId(dexController.getClass());
             if (setExternal != null) {
                 try {
@@ -1443,9 +1484,6 @@ public final class DexLayerStackHook implements IXposedHookLoadPackage {
                             + "falling back to primary field: " + cause);
                 }
             }
-            java.lang.reflect.Field primaryDisplayField = dexController.getClass()
-                    .getDeclaredField("mPrimaryExternalDesktopDisplayId");
-            primaryDisplayField.setAccessible(true);
             primaryDisplayField.setInt(dexController, -1);
             XposedBridge.log(TAG + ": dex controller primary field cleared displayId="
                     + displayId);
