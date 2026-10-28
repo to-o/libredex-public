@@ -6,6 +6,9 @@ import android.os.SystemClock;
 import com.connect_screen.mirror.State;
 import com.connect_screen.mirror.job.AcquireShizuku;
 
+import java.util.function.BooleanSupplier;
+import java.util.function.Supplier;
+
 /** Bounded recovery for a live Shizuku server with an unavailable UserService. */
 public final class UserServiceRecovery {
     private static final String MANAGER_URI = "content://moe.shizuku.privileged.api.shizuku";
@@ -51,26 +54,65 @@ public final class UserServiceRecovery {
         if (Looper.myLooper() == Looper.getMainLooper()) {
             throw new IllegalStateException("UserService recovery requires a worker thread");
         }
-        if (!ShizukuUtils.isShizukuServerHealthy()) {
-            if (!AcquireShizuku.fixRootShizuku()) return false;
+        return ensureReady(requireRoot, DEVICE);
+    }
+
+    /** Verify the same live helper before and after its root RPC. */
+    public static boolean isReady(boolean requireRoot) {
+        return isReady(requireRoot, () -> State.userService, State::isUserServiceAlive);
+    }
+
+    static boolean isReady(boolean requireRoot, Supplier<IUserService> currentService,
+                           BooleanSupplier isAlive) {
+        try {
+            IUserService service = currentService.get();
+            if (service == null || !isAlive.getAsBoolean()) return false;
+            if (requireRoot && !service.isRooted()) return false;
+            // The remote process can die, or the callback can replace the
+            // helper, while isRooted() is in flight. Never certify that replacement.
+            return service == currentService.get() && isAlive.getAsBoolean();
+        } catch (Throwable t) {
+            return false;
         }
-        if (!ShizukuUtils.hasPermission()) return false;
-        for (int attempt = 0; attempt < 2; attempt++) {
+    }
+
+    interface Backend {
+        boolean isServerHealthy();
+        boolean hasPermission();
+        void bindAndAwait();
+        boolean isReady(boolean requireRoot);
+        boolean restartAsRoot();
+        void unbind();
+        void log(String message);
+    }
+
+    private static final Backend DEVICE = new Backend() {
+        public boolean isServerHealthy() { return ShizukuUtils.isShizukuServerHealthy(); }
+        public boolean hasPermission() { return ShizukuUtils.hasPermission(); }
+        public boolean isReady(boolean requireRoot) { return UserServiceRecovery.isReady(requireRoot); }
+        public boolean restartAsRoot() { return AcquireShizuku.fixRootShizuku(); }
+        public void unbind() { State.unbindUserService(); }
+        public void log(String message) { State.log(message); }
+        public void bindAndAwait() {
             State.ensureUserServiceBound();
             long deadline = SystemClock.elapsedRealtime() + 15_000;
             while (!State.isUserServiceAlive() && SystemClock.elapsedRealtime() < deadline) {
                 SystemClock.sleep(100);
             }
-            if (State.isUserServiceAlive()) {
-                try {
-                    if (!requireRoot || State.userService.isRooted()) return true;
-                    return AcquireShizuku.fixRootShizuku();
-                } catch (Throwable t) {
-                    State.log("UserService readiness failed: " + t);
-                }
+        }
+    };
+
+    static boolean ensureReady(boolean requireRoot, Backend backend) {
+        if (!backend.isServerHealthy() && !restartAndVerify(backend)) return false;
+        if (!backend.hasPermission()) return false;
+        for (int attempt = 0; attempt < 2; attempt++) {
+            backend.bindAndAwait();
+            if (backend.isReady(requireRoot)) return true;
+            if (requireRoot && backend.isReady(false)) {
+                return restartAndVerify(backend);
             }
-            State.log("UserService bind failed, removing stale record (attempt " + (attempt + 1) + ")");
-            State.unbindUserService();
+            backend.log("UserService bind failed, removing stale record (attempt " + (attempt + 1) + ")");
+            backend.unbind();
         }
         // A live server binder does not guarantee that the manager and client
         // use the same server. Concurrent boot starts were observed to leave
@@ -78,9 +120,15 @@ public final class UserServiceRecovery {
         // use the official starter once after ordinary binding retries; it
         // replaces the stale servers and then verifies a real root helper.
         if (requireRoot) {
-            State.log("UserService retries exhausted; restarting root Shizuku once");
-            return AcquireShizuku.fixRootShizuku();
+            backend.log("UserService retries exhausted; restarting root Shizuku once");
+            return restartAndVerify(backend);
         }
         return false;
+    }
+
+    private static boolean restartAndVerify(Backend backend) {
+        // A recovery result is a hint until the caller checks the resulting
+        // helper again. DP must never proceed with a dead or shell helper.
+        return backend.restartAsRoot() && backend.isReady(true);
     }
 }

@@ -1,5 +1,7 @@
 package com.connect_screen.mirror.job;
 
+import android.os.SystemClock;
+
 import java.io.BufferedReader;
 import java.io.File;
 import java.io.InputStreamReader;
@@ -7,6 +9,7 @@ import java.util.concurrent.TimeUnit;
 
 import com.connect_screen.mirror.State;
 import com.connect_screen.mirror.shizuku.ShizukuUtils;
+import com.connect_screen.mirror.shizuku.UserServiceRecovery;
 
 import rikka.shizuku.Shizuku;
 
@@ -39,12 +42,9 @@ public class AcquireShizuku implements Job {
     }
 
     public static synchronized boolean fixRootShizuku() {
-        try {
-            if (State.userService != null && State.userService.isRooted()) {
-                State.log("UserService already running as root");
-                return true;
-            }
-        } catch (Throwable ignored) {
+        if (UserServiceRecovery.isReady(true)) {
+            State.log("UserService already running as root");
+            return true;
         }
         State.log("UserService is not root; restarting Shizuku as root");
         // Temporary root (KSU temp grant) expires after first use; force fresh probe instead of cached true
@@ -77,15 +77,14 @@ public class AcquireShizuku implements Job {
         // Let the old shell server die before waiting for the root server.
         sleep(1000);
 
-        long deadline = System.currentTimeMillis() + 10_000;
-        while (System.currentTimeMillis() < deadline) {
-            try {
-                if (Shizuku.pingBinder()) {
-                    break;
-                }
-            } catch (Throwable ignored) {
-            }
+        long serverDeadline = SystemClock.elapsedRealtime() + 10_000;
+        while (!ShizukuUtils.isShizukuServerHealthy()
+                && SystemClock.elapsedRealtime() < serverDeadline) {
             sleep(300);
+        }
+        if (!ShizukuUtils.isShizukuServerHealthy()) {
+            State.log("Shizuku server unavailable after root restart");
+            return false;
         }
         // 绑定 UserService 需要 Shizuku 已授权本应用；未授权时 bind 会抛
         // SecurityException（addUserService requires permission）直接崩线程，这里先做权限防护。
@@ -95,43 +94,32 @@ public class AcquireShizuku implements Job {
             State.log("Shizuku not granted, cannot bind root UserService");
             return false;
         }
-        while (System.currentTimeMillis() < deadline) {
-            if (State.isUserServiceAlive()) {
-                break;
+        // Server startup must not consume the helper's binding timeout.
+        long bindDeadline = SystemClock.elapsedRealtime() + 15_000;
+        while (SystemClock.elapsedRealtime() < bindDeadline) {
+            if (UserServiceRecovery.isReady(true)) {
+                State.log("UserService restarted as root");
+                return true;
             }
             sleep(300);
         }
-        try {
-            if (State.userService != null && State.userService.isRooted()) {
-                State.log("UserService restarted as root");
-                return true;
-            } else {
-                State.log("UserService still not root after restart");
-            }
-        } catch (Throwable t) {
-            State.log("UserService root check failed: " + t.getMessage());
-        }
+        State.log("UserService unavailable or not root after restart");
         return false;
     }
 
     /**
-     * 应用启动时在后台自动探活 root（纯 su，不依赖 Shizuku 的 shizuku_starter 机制）：
-     * su 可用 → 视为已具备 root 能力（isRooted()/executeRootShellCommand 都基于 su），
-     *           只尝试确保 UserService 已绑定（若 Shizuku 已授权则绑定，绝不主动重启 Shizuku）；
+     * 应用启动时在后台探活本地 root 与 Shizuku：
+     * su 可用 → 只证明本地可执行 root 命令，不代表远端 UserService 以 uid 0 运行；
+     *           server 健康时只尝试绑定，server 掉线时才用官方 starter 恢复；
      * su 不可用 → 仅记录日志，Shizuku 授权兜底由 onResume 主线程的 AcquireShizuku 任务负责。
      * 全程后台线程，不阻塞主线程；失败只记录日志，不打扰用户。
      */
     public static void autoAcquireRoot() {
         new Thread(() -> {
             try {
-                if (State.userService != null) {
-                    try {
-                        if (State.userService.isRooted()) {
-                            State.log("Auto root acquisition: already has root, skipping");
-                            return;
-                        }
-                    } catch (Throwable ignored) {
-                    }
+                if (UserServiceRecovery.isReady(true)) {
+                    State.log("Auto root acquisition: already has root, skipping");
+                    return;
                 }
                 // 直接 su 探活，不经过 Shizuku/root 重启。
                 String su = findSu();
