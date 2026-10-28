@@ -6,11 +6,14 @@ root privileges, and a live physical external display.
 
 ## Startup behavior
 
-Before binding the helper, a worker probes the manager provider. If Samsung
+Before binding the helper, a worker probes the manager provider with a harmless
+`content call`. Android 16 on SM-F7310 throws in the content shell's `gettype`
+path even with a running manager, so `gettype` is not a readiness signal. If Samsung
 blocks provider startup for a sleeping manager, recovery explicitly opens the
 manager once and probes it again. When an activity is available, it returns to
 LibreDeX after recovery. A failed helper bind is removed and retried once.
-The UI remains responsive while these bounded operations run. Failure leaves
+The probe is advisory: even if it fails, the actual UserService bind is attempted;
+its live binder and timeout decide readiness. The UI remains responsive while these bounded operations run. Failure leaves
 an actionable message directing the user to Shizuku rather than reporting a
 running DeX session.
 

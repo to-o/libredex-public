@@ -364,9 +364,10 @@ public class State {
             mainHandler.post(() -> {
                 if (generation != userServiceBindGeneration) return;
                 if (!managerReady) {
-                    userServiceBindInFlight = false;
-                    State.log("Shizuku manager provider could not be prepared");
-                    return;
+                    // A shell probe can fail independently of Shizuku's
+                    // binding path. Only the real binder connection/timeout
+                    // determines readiness; never block binding on this hint.
+                    State.log("Shizuku manager probe inconclusive; trying UserService binding");
                 }
                 try {
                     Shizuku.peekUserService(State.userServiceArgs, State.userServiceConnection);
