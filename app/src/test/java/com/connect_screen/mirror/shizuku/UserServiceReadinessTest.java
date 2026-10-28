@@ -124,6 +124,17 @@ public class UserServiceReadinessTest {
         assertFalse(backend.isReady(true));
     }
 
+    @Test
+    public void replacementDuringFinalLivenessCheckIsNotCertified() {
+        FakeBackend backend = FakeBackend.connected(true);
+        int[] checks = {0};
+
+        assertFalse(UserServiceRecovery.isReady(true, () -> backend.service, () -> {
+            if (++checks[0] == 2) backend.service = new TestService(false);
+            return true;
+        }));
+    }
+
     private static final class TestService extends IUserService.Default {
         final boolean root;
         Runnable onRootCheck = () -> {};

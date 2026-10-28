@@ -70,7 +70,7 @@ public final class UserServiceRecovery {
             if (requireRoot && !service.isRooted()) return false;
             // The remote process can die, or the callback can replace the
             // helper, while isRooted() is in flight. Never certify that replacement.
-            return service == currentService.get() && isAlive.getAsBoolean();
+            return isAlive.getAsBoolean() && service == currentService.get();
         } catch (Throwable t) {
             return false;
         }
