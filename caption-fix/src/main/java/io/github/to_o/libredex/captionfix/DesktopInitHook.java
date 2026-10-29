@@ -11,7 +11,7 @@ import de.robv.android.xposed.XC_MethodHook;
 import de.robv.android.xposed.XposedBridge;
 import de.robv.android.xposed.XposedHelpers;
 
-/** Replay Samsung's native eligibility callback when LibreDeX starts after display discovery. */
+/** Replay Samsung's display-added callback when LibreDeX starts after display discovery. */
 final class DesktopInitHook {
     private static final AtomicBoolean WATCHING = new AtomicBoolean();
 
@@ -26,7 +26,9 @@ final class DesktopInitHook {
             Method setDisplay = companion.getDeclaredMethod("setDesktopExternalDisplayId", int.class);
             setDisplay.setAccessible(true);
             Field nativeDisplay = field(stateClass, "desktopExternalDisplayId");
-            Method eligibleChanged = handlerClass.getDeclaredMethod("onDesktopModeEligibleChanged", int.class);
+            // The eligibility callback skips desk creation once the native display id
+            // is set. Display-added also restores or creates the native default desk.
+            Method eligibleChanged = handlerClass.getDeclaredMethod("onDisplayAdded", int.class);
             eligibleChanged.setAccessible(true);
             Method get = Class.forName("android.os.SystemProperties")
                     .getMethod("get", String.class, String.class);
@@ -41,10 +43,19 @@ final class DesktopInitHook {
                             Method eligible = windowManager.getClass().getMethod("isEligibleForDesktopMode", int.class);
                             eligible.setAccessible(true);
                             Object controller = field(handlerClass, "displayController").get(target);
+                            Object repositories = field(handlerClass, "desktopUserRepositories").get(target);
+                            Method currentRepository = repositories.getClass().getMethod("getCurrent");
+                            currentRepository.setAccessible(true);
+                            Method activeDesk = Class.forName(
+                                    "com.android.wm.shell.desktopmode.DesktopRepository", false, loader)
+                                    .getMethod("getActiveDeskId", int.class);
+                            activeDesk.setAccessible(true);
                             Executor executor = (Executor) field(controller.getClass(), "mMainExecutor").get(controller);
                             Handler timer = new Handler(Looper.getMainLooper());
                             timer.postDelayed(new Runnable() {
-                                private int requested = -1;
+                                private volatile int requested = -1;
+                                private int attempts;
+                                private int attemptedDisplay = -1;
                                 private boolean failureLogged;
                                 @Override public void run() {
                                     try {
@@ -54,14 +65,19 @@ final class DesktopInitHook {
                                                 "persist.dex.lspmirror.desktop_init", "1"));
                                         boolean active = "1".equals(get.invoke(null,
                                                 "dex.lspmirror.dp_session_active", "0"));
-                                        if (!active) { requested = -1; return; }
+                                        if (!active) { requested = -1; attempts = 0; return; }
                                         int display;
                                         try {
                                             display = Integer.parseInt((String) get.invoke(null,
                                                     "persist.dex.lspmirror.dp_display_id", "-1"));
                                         } catch (NumberFormatException ignored) { return; }
+                                        if (attemptedDisplay != display) {
+                                            attemptedDisplay = display;
+                                            attempts = 0;
+                                            requested = -1;
+                                        }
                                         if (DesktopInitPolicy.shouldInitialize(enabled, firmware, active,
-                                                display, nativeDisplay.getInt(null), requested)
+                                                display, requested)
                                                 && Boolean.TRUE.equals(eligible.invoke(windowManager, display))) {
                                             requested = display;
                                             executor.execute(() -> {
@@ -71,7 +87,16 @@ final class DesktopInitHook {
                                                             || !String.valueOf(display).equals(get.invoke(null,
                                                             "persist.dex.lspmirror.dp_display_id", "-1"))) return;
                                                     int previous = nativeDisplay.getInt(null);
-                                                    if (previous == display) return;
+                                                    Object repository = currentRepository.invoke(repositories);
+                                                    if (DesktopInitPolicy.isReady(display, previous,
+                                                            activeDesk.invoke(repository, display))) {
+                                                        XposedBridge.log("LibreDeXCaption: native desktop ready display=" + display);
+                                                        return;
+                                                    }
+                                                    if (++attempts > 3) {
+                                                        XposedBridge.log("LibreDeXCaption: native desktop not ready after three attempts display=" + display);
+                                                        return;
+                                                    }
                                                     setDisplay.invoke(null, display);
                                                     try {
                                                         eligibleChanged.invoke(target, display);
@@ -79,8 +104,12 @@ final class DesktopInitHook {
                                                         setDisplay.invoke(null, previous);
                                                         throw failure;
                                                     }
-                                                    XposedBridge.log("LibreDeXCaption: native desktop initialized display=" + display);
+                                                    // Native desk creation may finish asynchronously. Recheck
+                                                    // on the existing timer rather than claiming readiness here.
+                                                    requested = -1;
+                                                    XposedBridge.log("LibreDeXCaption: native display-added replay requested display=" + display);
                                                 } catch (Throwable failure) {
+                                                    if (attempts < 3) requested = -1;
                                                     XposedBridge.log("LibreDeXCaption: native desktop replay failed: " + failure);
                                                 }
                                             });
