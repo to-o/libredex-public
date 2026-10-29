@@ -60,6 +60,7 @@ public final class DexLayerStackHook implements IXposedHookLoadPackage {
             return;
         }
         systemServerClassLoader = lpparam.classLoader;
+        SamsungDexPowerHook.install(lpparam.classLoader);
         cleanupStaleDpStateAtBoot();
         XposedBridge.log(TAG + ": hooking system_server");
         // 自报状态：hook 真正注入 system_server 后设置系统属性，
